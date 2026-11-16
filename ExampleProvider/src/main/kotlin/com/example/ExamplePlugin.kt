@@ -12,13 +12,16 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
+import com.google.android.material.navigation.NavigationBarView
 import com.google.android.material.navigationrail.NavigationRailView
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
@@ -41,6 +44,7 @@ class ExamplePlugin : Plugin() {
             host.runOnUiThread {
                 setupHomeInjection(host)
                 installExtensionRailItem(host)
+                installBottomBarButton(host)
             }
         }
     }
@@ -81,17 +85,7 @@ class ExamplePlugin : Plugin() {
         }
         if (rail.menu.findItem(RAIL_ITEM_ID) != null) return
 
-        val extensionResources = this.resources
-        val iconId = extensionResources?.getIdentifier(
-            "ic_extension_home",
-            "drawable",
-            "com.example"
-        ) ?: 0
-        val icon = if (iconId != 0) {
-            extensionResources?.getDrawable(iconId, act.theme)
-        } else {
-            act.getDrawable(android.R.drawable.btn_star_big_on)
-        }
+        val icon = getExtensionIcon(act)
 
         val item = rail.menu.add(0, RAIL_ITEM_ID, rail.menu.size(), "Home Lab").apply {
             icon?.let(::setIcon)
@@ -104,6 +98,71 @@ class ExamplePlugin : Plugin() {
         item.setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_NEVER)
     }
 
+    private fun getExtensionIcon(context: Context) = runCatching {
+        val extResources = resources
+        val iconId = extResources?.getIdentifier("ic_extension_home", "drawable", "com.example") ?: 0
+        if (iconId != 0) extResources?.getDrawable(iconId, context.theme)
+        else context.getDrawable(android.R.drawable.btn_star_big_on)
+    }.getOrNull()
+
+    /**
+     * Phone layout uses a BottomNavigationView with five fixed menu slots. Add a sibling
+     * button and constrain the existing bar to it, instead of inserting a sixth menu item.
+     */
+    private fun installBottomBarButton(act: AppCompatActivity, attempt: Int = 0) {
+        val bottomId = act.resources.getIdentifier("nav_view", "id", act.packageName)
+        val bottomBar = if (bottomId != 0) act.findViewById<View>(bottomId) else null
+        val parent = bottomBar?.parent as? ConstraintLayout
+        if (bottomBar == null || parent == null || bottomBar.width == 0 || bottomBar.height == 0) {
+            if (attempt < BOTTOM_INSTALL_MAX_ATTEMPTS) {
+                act.window.decorView.postDelayed({ installBottomBarButton(act, attempt + 1) }, BOTTOM_INSTALL_RETRY_MS)
+            }
+            return
+        }
+        if (parent.findViewWithTag<View>(BOTTOM_BUTTON_TAG) != null) return
+
+        val existingParams = bottomBar.layoutParams ?: return
+        val originalBarParams = existingParams as? ConstraintLayout.LayoutParams ?: return
+        val buttonParams = ConstraintLayout.LayoutParams(dp(act, BOTTOM_BUTTON_WIDTH_DP), originalBarParams.height)
+        val buttonId = View.generateViewId()
+        val button = ImageButton(act).apply {
+            id = buttonId
+            tag = BOTTOM_BUTTON_TAG
+            contentDescription = "Home Lab"
+            isFocusable = true
+            isClickable = true
+            setPadding(0, 0, 0, 0)
+            background = act.obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackgroundBorderless)).let { attrs ->
+                val drawable = attrs.getDrawable(0)
+                attrs.recycle()
+                drawable
+            }
+            setImageDrawable(getExtensionIcon(act))
+            imageTintList = (bottomBar as? com.google.android.material.bottomnavigation.BottomNavigationView)?.itemIconTintList
+            setOnClickListener { openHomeLab(act) }
+        }
+
+        try {
+            buttonParams.startToEnd = bottomBar.id
+            buttonParams.endToEnd = ConstraintLayout.LayoutParams.PARENT_ID
+            buttonParams.leftToRight = bottomBar.id
+            buttonParams.rightToRight = ConstraintLayout.LayoutParams.PARENT_ID
+            buttonParams.topToTop = bottomBar.id
+            buttonParams.bottomToBottom = bottomBar.id
+            val barParams = ConstraintLayout.LayoutParams(originalBarParams)
+            barParams.endToStart = buttonId
+            barParams.endToEnd = ConstraintLayout.LayoutParams.UNSET
+            barParams.rightToLeft = buttonId
+            barParams.rightToRight = ConstraintLayout.LayoutParams.UNSET
+
+            parent.addView(button, buttonParams)
+            bottomBar.layoutParams = barParams
+        } catch (_: Throwable) {
+            bottomBar.layoutParams = originalBarParams
+            (button.parent as? ViewGroup)?.removeView(button)
+        }
+    }
+
     private fun openHomeLab(act: AppCompatActivity) {
         val homeRoot = findHomeRoot(act.supportFragmentManager)
         if (homeRoot != null) {
@@ -112,15 +171,18 @@ class ExamplePlugin : Plugin() {
         }
 
         val railId = act.resources.getIdentifier("nav_rail_view", "id", act.packageName)
-        val rail = if (railId != 0) act.findViewById<NavigationRailView>(railId) else null
+        val bottomId = act.resources.getIdentifier("nav_view", "id", act.packageName)
+        val rail = if (railId != 0) act.findViewById<NavigationBarView>(railId) else null
+        val bottom = if (bottomId != 0) act.findViewById<NavigationBarView>(bottomId) else null
+        val navBar = listOfNotNull(rail, bottom).firstOrNull { it.isShown }
         val homeItemId = act.resources.getIdentifier("navigation_home", "id", act.packageName)
-        if (rail == null || homeItemId == 0 || rail.menu.findItem(homeItemId) == null) {
+        if (navBar == null || homeItemId == 0 || navBar.menu.findItem(homeItemId) == null) {
             Toast.makeText(act, "Home CloudStream tidak ditemukan", Toast.LENGTH_SHORT).show()
             return
         }
 
-        rail.menu.performIdentifierAction(homeItemId, 0)
-        rail.postDelayed({
+        navBar.menu.performIdentifierAction(homeItemId, 0)
+        navBar.postDelayed({
             val root = findHomeRoot(act.supportFragmentManager)
             if (root != null) launchTakeoverFromRoot(act, root)
             else Toast.makeText(act, "Home sedang dimuat, tekan ikon lagi sebentar", Toast.LENGTH_SHORT).show()
@@ -389,5 +451,9 @@ class ExamplePlugin : Plugin() {
         const val HOME_NAVIGATION_DELAY_MS = 500L
         const val RAIL_INSTALL_RETRY_MS = 250L
         const val RAIL_INSTALL_MAX_ATTEMPTS = 20
+        const val BOTTOM_BUTTON_TAG = "test_plugin_bottom_home_lab"
+        const val BOTTOM_BUTTON_WIDTH_DP = 64
+        const val BOTTOM_INSTALL_RETRY_MS = 250L
+        const val BOTTOM_INSTALL_MAX_ATTEMPTS = 20
     }
 }
