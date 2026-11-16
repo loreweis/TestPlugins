@@ -20,7 +20,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
 import com.google.android.material.navigation.NavigationBarView
-import androidx.navigation.fragment.NavHostFragment
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 
@@ -104,19 +103,6 @@ class ExamplePlugin : Plugin() {
         if (iconId != 0) extResources?.getDrawable(iconId, context.theme)
         else context.getDrawable(android.R.drawable.btn_star_big_on)
     }.getOrNull()
-
-    fun openCloudStreamDownloads() {
-        val act = activity ?: return
-        val hostId = act.resources.getIdentifier("nav_host_fragment", "id", act.packageName)
-        val downloadsId = act.resources.getIdentifier("navigation_downloads", "id", act.packageName)
-        val host = if (hostId != 0) act.supportFragmentManager.findFragmentById(hostId) as? NavHostFragment else null
-        if (host == null || downloadsId == 0) {
-            Toast.makeText(act, "Layar Downloads tidak ditemukan", Toast.LENGTH_SHORT).show()
-            return
-        }
-        runCatching { host.navController.navigate(downloadsId) }
-            .onFailure { Toast.makeText(act, "Gagal membuka Downloads: ${it.message}", Toast.LENGTH_SHORT).show() }
-    }
 
     private fun openHomeLab(act: AppCompatActivity) {
         val homeRoot = findHomeRoot(act.supportFragmentManager)
