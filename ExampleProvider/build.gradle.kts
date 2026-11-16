@@ -24,7 +24,7 @@ cloudstream {
     tvTypes = listOf("Movie")
 
     requiresResources = true
-    language = "en"
+    language = "id"
 
     // Random CC logo I found
     iconUrl = "https://external-content.duckduckgo.com/ip3/cloudstream.miraheze.org.ico"
