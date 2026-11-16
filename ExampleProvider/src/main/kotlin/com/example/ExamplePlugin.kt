@@ -81,8 +81,20 @@ class ExamplePlugin : Plugin() {
         }
         if (rail.menu.findItem(RAIL_ITEM_ID) != null) return
 
+        val extensionResources = this.resources
+        val iconId = extensionResources?.getIdentifier(
+            "ic_extension_home",
+            "drawable",
+            "com.example"
+        ) ?: 0
+        val icon = if (iconId != 0) {
+            extensionResources?.getDrawable(iconId, act.theme)
+        } else {
+            act.getDrawable(android.R.drawable.btn_star_big_on)
+        }
+
         val item = rail.menu.add(0, RAIL_ITEM_ID, rail.menu.size(), "Home Lab").apply {
-            resources?.getDrawable(R.drawable.ic_extension_home, act.theme)?.let(::setIcon)
+            icon?.let(::setIcon)
             isCheckable = false
             setOnMenuItemClickListener {
                 openHomeLab(act)
