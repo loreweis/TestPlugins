@@ -1,11 +1,11 @@
 dependencies {
     implementation("com.google.android.material:material:1.14.0")
-    implementation("androidx.constraintlayout:constraintlayout:2.2.1")
+    implementation("androidx.navigation:navigation-fragment-ktx:2.9.8")
     implementation("androidx.recyclerview:recyclerview:1.4.0")
 }
 
 // Use an integer for version numbers
-version = 6
+version = 8
 
 cloudstream {
     // All of these properties are optional, you can safely remove any of them.

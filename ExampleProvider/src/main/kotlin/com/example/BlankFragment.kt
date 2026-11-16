@@ -175,6 +175,30 @@ class BlankFragment(private val plugin: ExamplePlugin? = null) : BottomSheetDial
         }
         rootLayout.addView(badgesRow)
 
+        // Keep the host's original Downloads destination reachable after its nav slot is repurposed.
+        val downloadsCard = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            background = bgCard()
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, dp(12)) }
+
+            addView(TextView(ctx).apply {
+                text = "CloudStream shortcuts"
+                textSize = 14f
+                setTypeface(Typeface.DEFAULT_BOLD)
+                setTextColor(Color.parseColor("#58A6FF"))
+                setPadding(0, 0, 0, dp(8))
+            })
+            addView(button("⬇  Open Downloads", Color.parseColor("#21262D"), Color.parseColor("#F0F6FC")) {
+                plugin?.openCloudStreamDownloads()
+                dismiss()
+            })
+        }
+        rootLayout.addView(downloadsCard)
+
         // CARD 1: Host & Memory Telemetry
         val card1 = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
