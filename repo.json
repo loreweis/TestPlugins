@@ -1,0 +1,9 @@
+{
+  "name": "Test",
+  "iconUrl": "https://avatars.githubusercontent.com/u/110329388?v=4&size=64",
+  "description": "Test plugin repo",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/loreweis/TestPlugins/refs/heads/builds/plugins.json"
+  ]
+}
