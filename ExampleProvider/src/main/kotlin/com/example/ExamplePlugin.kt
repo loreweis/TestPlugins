@@ -19,6 +19,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
+import com.google.android.material.navigationrail.NavigationRailView
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 
@@ -36,7 +37,12 @@ class ExamplePlugin : Plugin() {
             hostAct?.let { BlankFragment(this).show(it.supportFragmentManager, "TestControlCenter") }
         }
 
-        act?.let { host -> host.runOnUiThread { setupHomeInjection(host) } }
+        act?.let { host ->
+            host.runOnUiThread {
+                setupHomeInjection(host)
+                installExtensionRailItem(host)
+            }
+        }
     }
 
     private fun getAppCompatActivity(ctx: Context?): AppCompatActivity? {
@@ -63,6 +69,74 @@ class ExamplePlugin : Plugin() {
     }
 
     private fun isHomeFragment(fragment: Fragment) = fragment.javaClass.simpleName.contains("Home", ignoreCase = true)
+
+    private fun installExtensionRailItem(act: AppCompatActivity, attempt: Int = 0) {
+        val railId = act.resources.getIdentifier("nav_rail_view", "id", act.packageName)
+        val rail = if (railId != 0) act.findViewById<NavigationRailView>(railId) else null
+        if (rail == null) {
+            if (attempt < RAIL_INSTALL_MAX_ATTEMPTS) {
+                act.window.decorView.postDelayed({ installExtensionRailItem(act, attempt + 1) }, RAIL_INSTALL_RETRY_MS)
+            }
+            return
+        }
+        if (rail.menu.findItem(RAIL_ITEM_ID) != null) return
+
+        val item = rail.menu.add(0, RAIL_ITEM_ID, rail.menu.size(), "Home Lab").apply {
+            resources?.getDrawable(R.drawable.ic_extension_home, act.theme)?.let(::setIcon)
+            isCheckable = false
+            setOnMenuItemClickListener {
+                openHomeLab(act)
+                true
+            }
+        }
+        item.setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_NEVER)
+    }
+
+    private fun openHomeLab(act: AppCompatActivity) {
+        val homeRoot = findHomeRoot(act.supportFragmentManager)
+        if (homeRoot != null) {
+            homeRoot.post { launchTakeoverFromRoot(act, homeRoot) }
+            return
+        }
+
+        val railId = act.resources.getIdentifier("nav_rail_view", "id", act.packageName)
+        val rail = if (railId != 0) act.findViewById<NavigationRailView>(railId) else null
+        val homeItemId = act.resources.getIdentifier("navigation_home", "id", act.packageName)
+        if (rail == null || homeItemId == 0 || rail.menu.findItem(homeItemId) == null) {
+            Toast.makeText(act, "Home CloudStream tidak ditemukan", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        rail.menu.performIdentifierAction(homeItemId, 0)
+        rail.postDelayed({
+            val root = findHomeRoot(act.supportFragmentManager)
+            if (root != null) launchTakeoverFromRoot(act, root)
+            else Toast.makeText(act, "Home sedang dimuat, tekan ikon lagi sebentar", Toast.LENGTH_SHORT).show()
+        }, HOME_NAVIGATION_DELAY_MS)
+    }
+
+    private fun findHomeRoot(manager: FragmentManager): View? {
+        manager.fragments.forEach { fragment ->
+            if (isHomeFragment(fragment) && fragment.isVisible) {
+                val view = fragment.view ?: return@forEach
+                val rootId = view.resources.getIdentifier("home_root", "id", view.context.packageName)
+                return if (rootId != 0) view.findViewById(rootId) else view
+            }
+            findHomeRoot(fragment.childFragmentManager)?.let { return it }
+        }
+        return null
+    }
+
+    private fun launchTakeoverFromRoot(act: AppCompatActivity, rootView: View) {
+        val root = rootView as? ViewGroup ?: return
+        val recyclerId = act.resources.getIdentifier("home_master_recycler", "id", act.packageName)
+        val recycler = if (recyclerId != 0) root.findViewById<View>(recyclerId) else null
+        if (recycler == null) {
+            Toast.makeText(act, "Feed Home CloudStream tidak ditemukan", Toast.LENGTH_SHORT).show()
+            return
+        }
+        showTakeover(act, root, recycler)
+    }
 
     private fun checkAndInjectExisting(act: AppCompatActivity, manager: FragmentManager) {
         manager.fragments.forEach { fragment ->
@@ -299,5 +373,9 @@ class ExamplePlugin : Plugin() {
     private companion object {
         const val TOOLS_TAG = "test_plugin_home_tools"
         const val TAKEOVER_TAG = "test_plugin_home_takeover"
+        const val RAIL_ITEM_ID = 0x00E771
+        const val HOME_NAVIGATION_DELAY_MS = 500L
+        const val RAIL_INSTALL_RETRY_MS = 250L
+        const val RAIL_INSTALL_MAX_ATTEMPTS = 20
     }
 }
