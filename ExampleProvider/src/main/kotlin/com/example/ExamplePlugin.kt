@@ -331,6 +331,12 @@ class ExamplePlugin : Plugin() {
             state
         }
 
+        if (headerState.brandContainer?.parent === account) {
+            attachHomepageNameWatcher(host, homeFragment, headerState)
+            updateSelectedProvider(host, homeFragment, headerState, getHomeApiName(homeFragment))
+            return true
+        }
+
         account.removeAllViews()
         (account as? LinearLayout)?.gravity = Gravity.CENTER_VERTICAL or Gravity.START
         account.setPadding(dp(host, 16), 0, dp(host, 8), 0)
@@ -378,6 +384,9 @@ class ExamplePlugin : Plugin() {
                 setColor(Color.TRANSPARENT)
             }
         }
+        detachFromParent(headerState.brandFallback)
+        detachFromParent(headerState.brandIcon)
+        detachFromParent(headerState.brandName)
         iconBox.addView(headerState.brandFallback, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
@@ -406,6 +415,7 @@ class ExamplePlugin : Plugin() {
             }
         }
         account.addView(brand)
+        headerState.brandContainer = brand
 
         parent.removeAllViews()
         orderedChildren.forEachIndexed { index, child ->
@@ -570,6 +580,10 @@ class ExamplePlugin : Plugin() {
         }
     }
 
+    private fun detachFromParent(view: View) {
+        (view.parent as? ViewGroup)?.removeView(view)
+    }
+
     private fun getExtensionName(api: MainAPI) = api.name.removeSuffix("Provider")
 
     private fun copyLayoutParams(params: ViewGroup.LayoutParams?): ViewGroup.LayoutParams? = when (params) {
@@ -654,6 +668,7 @@ class ExamplePlugin : Plugin() {
         val brandIcon: ImageView,
         val brandFallback: TextView,
         val brandName: TextView,
+        var brandContainer: ViewGroup? = null,
         var homeApiFab: TextView? = null,
         var homeApiFabWatcher: TextWatcher? = null,
         var iconJob: Job? = null
