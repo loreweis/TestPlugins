@@ -43,7 +43,7 @@ class ExamplePlugin : Plugin() {
     private val fragmentCallbacks = WeakHashMap<AppCompatActivity, FragmentManager.FragmentLifecycleCallbacks>()
     private val layoutWatchers = WeakHashMap<View, LayoutWatcher>()
     private val recyclerWatchers = WeakHashMap<RecyclerView, RecyclerView.OnChildAttachStateChangeListener>()
-    private val providerStrips = WeakHashMap<ViewGroup, ProviderStripState>()
+    private val homeHeaderStates = WeakHashMap<ViewGroup, HomeHeaderState>()
 
     override fun load(context: Context) {
         activity = getAppCompatActivity(context)
@@ -138,20 +138,10 @@ class ExamplePlugin : Plugin() {
             recycler.removeOnChildAttachStateChangeListener(listener)
         }
         recyclerWatchers.clear()
-        providerStrips.forEach { (container, state) ->
-            container.removeAllViews()
-            state.children.forEachIndexed { index, child ->
-                if (child.parent == null) {
-                    val params = state.childLayoutParams[index]
-                    if (params == null) container.addView(child, index.coerceAtMost(container.childCount))
-                    else container.addView(child, index.coerceAtMost(container.childCount), params)
-                }
-            }
-            state.containerLayoutParams?.let { container.layoutParams = it }
-            container.setPadding(state.paddingLeft, state.paddingTop, state.paddingRight, state.paddingBottom)
-            (container as? LinearLayout)?.gravity = state.gravity
+        homeHeaderStates.toMap().forEach { (account, state) ->
+            runCatching { restoreHomeHeader(account, state) }
         }
-        providerStrips.clear()
+        homeHeaderStates.clear()
         activity = null
         application = null
     }
@@ -285,14 +275,14 @@ class ExamplePlugin : Plugin() {
         homeFragment: Fragment,
         headerRoot: View
     ): Boolean {
-        val stripId = host.resources.getIdentifier("alternative_account_padding", "id", host.packageName)
-        val strip = (if (stripId != 0) headerRoot.findViewById<ViewGroup>(stripId) else null)
-            ?: return false
-
-        val searchId = host.resources.getIdentifier("home_search", "id", host.packageName)
-        if (searchId != 0) headerRoot.findViewById<View>(searchId)?.visibility = View.VISIBLE
         val accountId = host.resources.getIdentifier("home_head_profile_padding", "id", host.packageName)
-        if (accountId != 0) headerRoot.findViewById<View>(accountId)?.visibility = View.VISIBLE
+        val searchId = host.resources.getIdentifier("home_search", "id", host.packageName)
+        val account = (if (accountId != 0) headerRoot.findViewById<ViewGroup>(accountId) else null)
+            ?: return false
+        val search = (if (searchId != 0) headerRoot.findViewById<androidx.appcompat.widget.SearchView>(searchId) else null)
+            ?: return false
+        val parent = account.parent as? ViewGroup ?: return false
+        if (search.parent !== parent || parent !is LinearLayout) return false
         (headerRoot as? ViewGroup)?.findViewWithTag<View>(LEGACY_SEARCH_BUTTON_TAG)?.let { button ->
             (button.parent as? ViewGroup)?.removeView(button)
         }
@@ -303,32 +293,48 @@ class ExamplePlugin : Plugin() {
             .sortedBy { it.name.lowercase() }
         if (providers.isEmpty()) return false
 
-        if (!providerStrips.containsKey(strip)) {
-            val oldChildren = (0 until strip.childCount).map { strip.getChildAt(it) }
-            val oldChildParams = oldChildren.map { copyLayoutParams(it.layoutParams) }
-            providerStrips[strip] = ProviderStripState(
-                children = oldChildren,
-                childLayoutParams = oldChildParams,
-                containerLayoutParams = copyLayoutParams(strip.layoutParams),
-                paddingLeft = strip.paddingLeft,
-                paddingTop = strip.paddingTop,
-                paddingRight = strip.paddingRight,
-                paddingBottom = strip.paddingBottom,
-                gravity = (strip as? LinearLayout)?.gravity ?: Gravity.CENTER
+        val headerState = homeHeaderStates[account] ?: run {
+            val originalChildren = (0 until parent.childCount).map(parent::getChildAt)
+            val searchIndex = originalChildren.indexOf(search)
+            val accountIndex = originalChildren.indexOf(account)
+            if (searchIndex < 0 || accountIndex < 0) return false
+            val accountChildren = (0 until account.childCount).map(account::getChildAt)
+            val state = HomeHeaderState(
+                parent = parent,
+                search = search,
+                originalChildren = originalChildren,
+                originalChildLayoutParams = originalChildren.map { copyLayoutParams(it.layoutParams) },
+                searchIndex = searchIndex,
+                accountIndex = accountIndex,
+                accountChildren = accountChildren,
+                accountChildLayoutParams = accountChildren.map { copyLayoutParams(it.layoutParams) },
+                accountLayoutParams = copyLayoutParams(account.layoutParams),
+                accountVisibility = account.visibility,
+                accountPadding = intArrayOf(account.paddingLeft, account.paddingTop, account.paddingRight, account.paddingBottom),
+                accountGravity = (account as? LinearLayout)?.gravity ?: Gravity.CENTER,
+                searchVisibility = search.visibility
             )
+            homeHeaderStates[account] = state
+            watchHomeHeaderLifecycle(account, state, homeFragment)
+            state
         }
-        strip.removeAllViews()
-        (strip as? LinearLayout)?.gravity = Gravity.CENTER_VERTICAL or Gravity.START
-        strip.setPadding(dp(host, 10), 0, dp(host, 10), 0)
-        strip.layoutParams?.let { params ->
-            params.height = dp(host, PROVIDER_STRIP_HEIGHT_DP)
-            strip.layoutParams = params
+
+        account.removeAllViews()
+        (account as? LinearLayout)?.gravity = Gravity.CENTER_VERTICAL or Gravity.START
+        account.setPadding(dp(host, 10), 0, dp(host, 6), 0)
+        account.visibility = View.VISIBLE
+        val orderedChildren = headerState.originalChildren.toMutableList().apply {
+            this[headerState.searchIndex] = account
+            this[headerState.accountIndex] = search
         }
-        strip.visibility = View.VISIBLE
         val scroll = HorizontalScrollView(host).apply {
             isHorizontalScrollBarEnabled = false
             isFillViewport = true
             clipToPadding = false
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
         }
         val row = LinearLayout(host).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -344,8 +350,82 @@ class ExamplePlugin : Plugin() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ))
-        strip.addView(scroll, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        account.addView(scroll)
+
+        parent.removeAllViews()
+        orderedChildren.forEachIndexed { index, child ->
+            val originalIndex = headerState.originalChildren.indexOf(child)
+            val params = when (child) {
+                account -> LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, HEADER_SELECTOR_WEIGHT)
+                search -> LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, HEADER_SEARCH_WEIGHT)
+                else -> copyLayoutParams(headerState.originalChildLayoutParams[originalIndex])
+            }
+            if (params == null) parent.addView(child, index)
+            else parent.addView(child, index, params)
+        }
+        search.setOnSearchClickListener {
+            search.post {
+                account.visibility = View.GONE
+                search.layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+        }
+        search.setOnCloseListener {
+            account.visibility = View.VISIBLE
+            account.layoutParams = LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                HEADER_SELECTOR_WEIGHT
+            )
+            search.layoutParams = LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                HEADER_SEARCH_WEIGHT
+            )
+            false
+        }
         return true
+    }
+
+    private fun watchHomeHeaderLifecycle(account: ViewGroup, state: HomeHeaderState, fragment: Fragment) {
+        val lifecycle = fragment.viewLifecycleOwner.lifecycle
+        val cleanup = object : LifecycleEventObserver {
+            override fun onStateChanged(source: androidx.lifecycle.LifecycleOwner, event: Lifecycle.Event) {
+                if (event == Lifecycle.Event.ON_DESTROY) {
+                    if (homeHeaderStates[account] === state) homeHeaderStates.remove(account)
+                    lifecycle.removeObserver(this)
+                }
+            }
+        }
+        lifecycle.addObserver(cleanup)
+    }
+
+    private fun restoreHomeHeader(account: ViewGroup, state: HomeHeaderState) {
+        state.search.setOnSearchClickListener(null)
+        state.search.setOnCloseListener(null)
+        account.removeAllViews()
+        state.accountChildren.forEachIndexed { index, child ->
+            val params = state.accountChildLayoutParams[index]
+            if (params == null) account.addView(child, index.coerceAtMost(account.childCount))
+            else account.addView(child, index.coerceAtMost(account.childCount), params)
+        }
+        state.accountLayoutParams?.let { account.layoutParams = it }
+        account.setPadding(
+            state.accountPadding[0], state.accountPadding[1],
+            state.accountPadding[2], state.accountPadding[3]
+        )
+        (account as? LinearLayout)?.gravity = state.accountGravity
+        account.visibility = state.accountVisibility
+        state.search.visibility = state.searchVisibility
+
+        state.parent.removeAllViews()
+        state.originalChildren.forEachIndexed { index, child ->
+            val params = state.originalChildLayoutParams[index]
+            if (params == null) state.parent.addView(child, index.coerceAtMost(state.parent.childCount))
+            else state.parent.addView(child, index.coerceAtMost(state.parent.childCount), params)
+        }
     }
 
     private fun createProviderItem(
@@ -434,6 +514,7 @@ class ExamplePlugin : Plugin() {
     private fun getExtensionName(api: MainAPI) = api.name.removeSuffix("Provider")
 
     private fun copyLayoutParams(params: ViewGroup.LayoutParams?): ViewGroup.LayoutParams? = when (params) {
+        is LinearLayout.LayoutParams -> LinearLayout.LayoutParams(params)
         is ViewGroup.MarginLayoutParams -> ViewGroup.MarginLayoutParams(params)
         null -> null
         else -> ViewGroup.LayoutParams(params)
@@ -503,7 +584,8 @@ class ExamplePlugin : Plugin() {
 
     private companion object {
         const val LEGACY_SEARCH_BUTTON_TAG = "test_plugin_advanced_search_button"
-        const val PROVIDER_STRIP_HEIGHT_DP = 52
+        const val HEADER_SELECTOR_WEIGHT = 1f
+        const val HEADER_SEARCH_WEIGHT = 0.42f
     }
 
     private data class LayoutWatcher(
@@ -511,14 +593,19 @@ class ExamplePlugin : Plugin() {
         val listener: ViewTreeObserver.OnGlobalLayoutListener
     )
 
-    private data class ProviderStripState(
-        val children: List<View>,
-        val childLayoutParams: List<ViewGroup.LayoutParams?>,
-        val containerLayoutParams: ViewGroup.LayoutParams?,
-        val paddingLeft: Int,
-        val paddingTop: Int,
-        val paddingRight: Int,
-        val paddingBottom: Int,
-        val gravity: Int
+    private data class HomeHeaderState(
+        val parent: ViewGroup,
+        val search: androidx.appcompat.widget.SearchView,
+        val originalChildren: List<View>,
+        val originalChildLayoutParams: List<ViewGroup.LayoutParams?>,
+        val searchIndex: Int,
+        val accountIndex: Int,
+        val accountChildren: List<View>,
+        val accountChildLayoutParams: List<ViewGroup.LayoutParams?>,
+        val accountLayoutParams: ViewGroup.LayoutParams?,
+        val accountVisibility: Int,
+        val accountPadding: IntArray,
+        val accountGravity: Int,
+        val searchVisibility: Int
     )
 }
