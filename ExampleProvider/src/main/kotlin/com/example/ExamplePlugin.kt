@@ -1,7 +1,12 @@
 package com.example
 
+import android.app.Activity
+import android.app.Application
+import android.content.ComponentCallbacks
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.res.Configuration
+import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
@@ -13,6 +18,7 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.navigation.NavigationBarView
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
@@ -21,7 +27,13 @@ import java.util.WeakHashMap
 @CloudstreamPlugin
 class ExamplePlugin : Plugin() {
     private var activity: AppCompatActivity? = null
-    private val layoutWatchers = WeakHashMap<View, ViewTreeObserver.OnGlobalLayoutListener>()
+    private var application: Application? = null
+    private var activityLifecycleCallbacks: Application.ActivityLifecycleCallbacks? = null
+    private var componentCallbacks: ComponentCallbacks? = null
+    private val attachedActivities = WeakHashMap<AppCompatActivity, Boolean>()
+    private val fragmentCallbacks = WeakHashMap<AppCompatActivity, FragmentManager.FragmentLifecycleCallbacks>()
+    private val layoutWatchers = WeakHashMap<View, LayoutWatcher>()
+    private val recyclerWatchers = WeakHashMap<RecyclerView, RecyclerView.OnChildAttachStateChangeListener>()
 
     override fun load(context: Context) {
         activity = getAppCompatActivity(context)
@@ -32,9 +44,78 @@ class ExamplePlugin : Plugin() {
             hostActivity?.let { BlankFragment(this).show(it.supportFragmentManager, "TestControlCenter") }
         }
 
-        activity?.let { host ->
-            host.runOnUiThread { observeHomeFragments(host) }
+        val app = context.applicationContext as? Application
+        if (app != null && activityLifecycleCallbacks == null) {
+            application = app
+            val callbacks = object : Application.ActivityLifecycleCallbacks {
+                override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+                    attachIfMainActivity(activity)
+                }
+
+                override fun onActivityStarted(activity: Activity) = Unit
+                override fun onActivityResumed(activity: Activity) = attachIfMainActivity(activity)
+                override fun onActivityPaused(activity: Activity) = Unit
+                override fun onActivityStopped(activity: Activity) = Unit
+                override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+                override fun onActivityDestroyed(activity: Activity) {
+                    (activity as? AppCompatActivity)?.let {
+                        fragmentCallbacks.remove(it)?.let(it.supportFragmentManager::unregisterFragmentLifecycleCallbacks)
+                        attachedActivities.remove(it)
+                        if (this@ExamplePlugin.activity === it) this@ExamplePlugin.activity = null
+                    }
+                }
+            }
+            activityLifecycleCallbacks = callbacks
+            app.registerActivityLifecycleCallbacks(callbacks)
         }
+        if (app != null && componentCallbacks == null) {
+            val callbacks = object : ComponentCallbacks {
+                override fun onConfigurationChanged(newConfig: Configuration) {
+                    activity?.let { host -> host.runOnUiThread { attachToActivity(host) } }
+                }
+
+                override fun onLowMemory() = Unit
+            }
+            componentCallbacks = callbacks
+            app.registerComponentCallbacks(callbacks)
+        }
+
+        activity?.let { host -> host.runOnUiThread { attachToActivity(host) } }
+    }
+
+    override fun beforeUnload() {
+        application?.let { app ->
+            activityLifecycleCallbacks?.let(app::unregisterActivityLifecycleCallbacks)
+            componentCallbacks?.let(app::unregisterComponentCallbacks)
+        }
+        activityLifecycleCallbacks = null
+        componentCallbacks = null
+
+        fragmentCallbacks.forEach { (host, callbacks) ->
+            host.supportFragmentManager.unregisterFragmentLifecycleCallbacks(callbacks)
+        }
+        fragmentCallbacks.clear()
+        attachedActivities.clear()
+
+        layoutWatchers.keys.toList().forEach(::stopWatchingHomeLayout)
+        recyclerWatchers.forEach { (recycler, listener) ->
+            recycler.removeOnChildAttachStateChangeListener(listener)
+        }
+        recyclerWatchers.clear()
+        activity = null
+        application = null
+    }
+
+    private fun attachIfMainActivity(activity: Activity) {
+        if (activity.javaClass.simpleName != "MainActivity") return
+        val host = activity as? AppCompatActivity ?: return
+        host.runOnUiThread { attachToActivity(host) }
+    }
+
+    private fun attachToActivity(host: AppCompatActivity) {
+        activity = host
+        if (attachedActivities.put(host, true) == null) observeHomeFragments(host)
+        visitFragments(host, host.supportFragmentManager)
     }
 
     private fun getAppCompatActivity(context: Context?): AppCompatActivity? {
@@ -47,6 +128,7 @@ class ExamplePlugin : Plugin() {
     }
 
     private fun observeHomeFragments(host: AppCompatActivity) {
+        if (fragmentCallbacks.containsKey(host)) return
         val callbacks = object : FragmentManager.FragmentLifecycleCallbacks() {
             override fun onFragmentViewCreated(
                 fm: FragmentManager,
@@ -60,8 +142,10 @@ class ExamplePlugin : Plugin() {
             override fun onFragmentResumed(fm: FragmentManager, fragment: Fragment) {
                 if (isHome(fragment)) fragment.view?.let { watchHomeLayout(host, fragment, it) }
             }
+
         }
         host.supportFragmentManager.registerFragmentLifecycleCallbacks(callbacks, true)
+        fragmentCallbacks[host] = callbacks
         visitFragments(host, host.supportFragmentManager)
     }
 
@@ -75,15 +159,24 @@ class ExamplePlugin : Plugin() {
     private fun isHome(fragment: Fragment) = fragment.javaClass.simpleName.contains("Home", ignoreCase = true)
 
     private fun watchHomeLayout(host: AppCompatActivity, fragment: Fragment, homeRoot: View) {
-        if (swapHeaderControls(host, homeRoot) || layoutWatchers.containsKey(homeRoot)) return
+        watchHomeRecycler(host, fragment, homeRoot)
+        if (swapHeaderControls(host, homeRoot)) return
+
+        layoutWatchers[homeRoot]?.let { existing ->
+            if (existing.observer.isAlive) return
+            layoutWatchers.remove(homeRoot)
+        }
+
+        val observer = homeRoot.viewTreeObserver
+        if (!observer.isAlive) return
 
         val watcher = object : ViewTreeObserver.OnGlobalLayoutListener {
             override fun onGlobalLayout() {
                 if (swapHeaderControls(host, homeRoot)) stopWatchingHomeLayout(homeRoot)
             }
         }
-        layoutWatchers[homeRoot] = watcher
-        homeRoot.viewTreeObserver.addOnGlobalLayoutListener(watcher)
+        layoutWatchers[homeRoot] = LayoutWatcher(observer, watcher)
+        observer.addOnGlobalLayoutListener(watcher)
 
         val lifecycle = fragment.viewLifecycleOwner.lifecycle
         val cleanup = object : LifecycleEventObserver {
@@ -97,10 +190,41 @@ class ExamplePlugin : Plugin() {
         lifecycle.addObserver(cleanup)
     }
 
+    private fun watchHomeRecycler(host: AppCompatActivity, fragment: Fragment, homeRoot: View) {
+        val recyclerId = host.resources.getIdentifier("home_master_recycler", "id", host.packageName)
+        val recycler = (if (recyclerId != 0) homeRoot.findViewById<RecyclerView>(recyclerId) else null)
+            ?: return
+        if (recyclerWatchers.containsKey(recycler)) return
+
+        val searchId = host.resources.getIdentifier("home_search", "id", host.packageName)
+        val listener = object : RecyclerView.OnChildAttachStateChangeListener {
+            override fun onChildViewAttachedToWindow(child: View) {
+                if (searchId != 0 && child.findViewById<View>(searchId) != null) {
+                    swapHeaderControls(host, child)
+                }
+            }
+
+            override fun onChildViewDetachedFromWindow(child: View) = Unit
+        }
+        recycler.addOnChildAttachStateChangeListener(listener)
+        recyclerWatchers[recycler] = listener
+
+        val lifecycle = fragment.viewLifecycleOwner.lifecycle
+        val cleanup = object : LifecycleEventObserver {
+            override fun onStateChanged(source: androidx.lifecycle.LifecycleOwner, event: Lifecycle.Event) {
+                if (event == Lifecycle.Event.ON_DESTROY) {
+                    recycler.removeOnChildAttachStateChangeListener(listener)
+                    recyclerWatchers.remove(recycler)
+                    lifecycle.removeObserver(this)
+                }
+            }
+        }
+        lifecycle.addObserver(cleanup)
+    }
+
     private fun stopWatchingHomeLayout(homeRoot: View) {
         val watcher = layoutWatchers.remove(homeRoot) ?: return
-        val observer = homeRoot.viewTreeObserver
-        if (observer.isAlive) observer.removeOnGlobalLayoutListener(watcher)
+        if (watcher.observer.isAlive) watcher.observer.removeOnGlobalLayoutListener(watcher.listener)
     }
 
     private fun swapHeaderControls(host: AppCompatActivity, homeRoot: View): Boolean {
@@ -134,7 +258,7 @@ class ExamplePlugin : Plugin() {
             search.visibility = View.INVISIBLE
 
             val searchButtonId = host.resources.getIdentifier("search_button", "id", host.packageName)
-            val searchButton = searchRow.findViewWithTag<ImageButton>(SEARCH_BUTTON_TAG)
+            val searchButton = (homeRoot as? ViewGroup)?.findViewWithTag<ImageButton>(SEARCH_BUTTON_TAG)
                 ?: ImageButton(host).apply {
                     id = searchButtonId.takeIf { it != 0 } ?: View.generateViewId()
                     tag = SEARCH_BUTTON_TAG
@@ -155,10 +279,13 @@ class ExamplePlugin : Plugin() {
                     imageTintList = originalSearchIcon?.imageTintList
                     setOnClickListener { openAdvancedSearch(host) }
                 }
-            if (searchButton.parent == null) {
+            if (searchButton.parent !== searchRow) {
+                (searchButton.parent as? ViewGroup)?.removeView(searchButton)
                 val params = LinearLayout.LayoutParams(dp(host, SEARCH_BUTTON_SIZE_DP), ViewGroup.LayoutParams.MATCH_PARENT)
                 searchRow.addView(searchButton, params)
             }
+            searchButton.setImageDrawable(drawable)
+            searchButton.imageTintList = originalSearchIcon?.imageTintList
 
             alternateProfile.nextFocusRightId = searchButton.id
             searchButton.nextFocusLeftId = alternateProfile.id
@@ -184,4 +311,9 @@ class ExamplePlugin : Plugin() {
         const val SEARCH_BUTTON_TAG = "test_plugin_advanced_search_button"
         const val SEARCH_BUTTON_SIZE_DP = 50
     }
+
+    private data class LayoutWatcher(
+        val observer: ViewTreeObserver,
+        val listener: ViewTreeObserver.OnGlobalLayoutListener
+    )
 }
