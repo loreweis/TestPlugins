@@ -530,10 +530,15 @@ class ExamplePlugin : Plugin() {
         val frameIndex = state.headerView.indexOfChild(state.heroFrame)
         if (frameIndex < 0) return
         (state.topBar.parent as? ViewGroup)?.removeView(state.topBar)
+        val topInset = (state.originalTopBarLayoutParams as? ViewGroup.MarginLayoutParams)?.topMargin ?: 0
+        val topBarParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = topInset }
         header.addView(
             state.topBar,
             frameIndex,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            topBarParams
         )
     }
 
