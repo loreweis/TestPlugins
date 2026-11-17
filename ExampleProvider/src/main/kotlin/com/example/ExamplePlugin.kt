@@ -10,11 +10,13 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
-import android.widget.HorizontalScrollView
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -23,14 +25,23 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.PluginManager
 import com.lagradost.cloudstream3.plugins.Plugin
+import com.lagradost.cloudstream3.plugins.RepositoryManager
+import com.lagradost.cloudstream3.plugins.RepositoryManager.PREBUILT_REPOSITORIES
+import com.lagradost.cloudstream3.plugins.PluginManager.getPluginsLocal
+import com.lagradost.cloudstream3.plugins.PluginManager.getPluginsOnline
+import com.lagradost.cloudstream3.ui.settings.extensions.RepositoryData
+import com.lagradost.cloudstream3.utils.ImageLoader.loadImage
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.WeakHashMap
 
 @CloudstreamPlugin
@@ -44,6 +55,8 @@ class ExamplePlugin : Plugin() {
     private val layoutWatchers = WeakHashMap<View, LayoutWatcher>()
     private val recyclerWatchers = WeakHashMap<RecyclerView, RecyclerView.OnChildAttachStateChangeListener>()
     private val homeHeaderStates = WeakHashMap<ViewGroup, HomeHeaderState>()
+    private val providerIconUrls = mutableMapOf<String, String?>()
+    private val providerIconRequests = mutableSetOf<String>()
 
     override fun load(context: Context) {
         activity = getAppCompatActivity(context)
@@ -142,6 +155,8 @@ class ExamplePlugin : Plugin() {
             runCatching { restoreHomeHeader(account, state) }
         }
         homeHeaderStates.clear()
+        providerIconUrls.clear()
+        providerIconRequests.clear()
         activity = null
         application = null
     }
@@ -203,7 +218,7 @@ class ExamplePlugin : Plugin() {
 
     private fun watchHomeLayout(host: AppCompatActivity, fragment: Fragment, homeRoot: View) {
         watchHomeRecycler(host, fragment, homeRoot)
-        if (installProviderStrip(host, fragment, homeRoot)) return
+        if (installHomeBrand(host, fragment, homeRoot)) return
 
         layoutWatchers[homeRoot]?.let { existing ->
             if (existing.observer.isAlive) return
@@ -215,7 +230,7 @@ class ExamplePlugin : Plugin() {
 
         val watcher = object : ViewTreeObserver.OnGlobalLayoutListener {
             override fun onGlobalLayout() {
-                if (installProviderStrip(host, fragment, homeRoot)) stopWatchingHomeLayout(homeRoot)
+                if (installHomeBrand(host, fragment, homeRoot)) stopWatchingHomeLayout(homeRoot)
             }
         }
         layoutWatchers[homeRoot] = LayoutWatcher(observer, watcher)
@@ -243,7 +258,7 @@ class ExamplePlugin : Plugin() {
         val listener = object : RecyclerView.OnChildAttachStateChangeListener {
             override fun onChildViewAttachedToWindow(child: View) {
                 if (searchId != 0 && child.findViewById<View>(searchId) != null) {
-                    installProviderStrip(host, fragment, child)
+                    installHomeBrand(host, fragment, child)
                 }
             }
 
@@ -270,7 +285,7 @@ class ExamplePlugin : Plugin() {
         if (watcher.observer.isAlive) watcher.observer.removeOnGlobalLayoutListener(watcher.listener)
     }
 
-    private fun installProviderStrip(
+    private fun installHomeBrand(
         host: AppCompatActivity,
         homeFragment: Fragment,
         headerRoot: View
@@ -286,12 +301,6 @@ class ExamplePlugin : Plugin() {
         (headerRoot as? ViewGroup)?.findViewWithTag<View>(LEGACY_SEARCH_BUTTON_TAG)?.let { button ->
             (button.parent as? ViewGroup)?.removeView(button)
         }
-
-        val providers = APIHolder.apis
-            .filter { it.hasMainPage && !it.sourcePlugin.isNullOrBlank() }
-            .distinctBy { it.sourcePlugin }
-            .sortedBy { it.name.lowercase() }
-        if (providers.isEmpty()) return false
 
         val headerState = homeHeaderStates[account] ?: run {
             val originalChildren = (0 until parent.childCount).map(parent::getChildAt)
@@ -312,7 +321,10 @@ class ExamplePlugin : Plugin() {
                 accountVisibility = account.visibility,
                 accountPadding = intArrayOf(account.paddingLeft, account.paddingTop, account.paddingRight, account.paddingBottom),
                 accountGravity = (account as? LinearLayout)?.gravity ?: Gravity.CENTER,
-                searchVisibility = search.visibility
+                searchVisibility = search.visibility,
+                brandIcon = ImageView(host),
+                brandFallback = TextView(host),
+                brandName = TextView(host)
             )
             homeHeaderStates[account] = state
             watchHomeHeaderLifecycle(account, state, homeFragment)
@@ -321,43 +333,86 @@ class ExamplePlugin : Plugin() {
 
         account.removeAllViews()
         (account as? LinearLayout)?.gravity = Gravity.CENTER_VERTICAL or Gravity.START
-        account.setPadding(dp(host, 10), 0, dp(host, 6), 0)
+        account.setPadding(dp(host, 16), 0, dp(host, 8), 0)
         account.visibility = View.VISIBLE
         val orderedChildren = headerState.originalChildren.toMutableList().apply {
             this[headerState.searchIndex] = account
             this[headerState.accountIndex] = search
         }
-        val scroll = HorizontalScrollView(host).apply {
-            isHorizontalScrollBarEnabled = false
-            isFillViewport = true
-            clipToPadding = false
+        val brand = LinearLayout(host).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Pilih provider"
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         }
-        val row = LinearLayout(host).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+        val iconBox = FrameLayout(host).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(host, 25), dp(host, 25)).apply {
+                marginEnd = dp(host, 9)
+            }
         }
-        val selectedApiName = getHomeApiName(homeFragment)
-        providers.forEach { api ->
-            val item = createProviderItem(host, homeFragment, api, api.name == selectedApiName)
-            row.addView(item)
-            if (api.name == selectedApiName) scroll.post { scroll.smoothScrollTo(item.left, 0) }
+        val initialName = getHomeApiName(homeFragment)
+            ?.let { APIHolder.getApiFromNameNull(it) }
+            ?.let(::getExtensionName)
+            ?: "Pilih provider"
+        headerState.brandFallback.apply {
+            text = initialName.trim().firstOrNull()?.uppercase() ?: "?"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setTextColor(resolveTextColor(host))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0x332196F3)
+            }
         }
-        scroll.addView(row, android.widget.FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
+        headerState.brandIcon.apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            clipToOutline = true
+            background = GradientDrawable().apply {
+                cornerRadius = dp(host, 4).toFloat()
+                setColor(Color.TRANSPARENT)
+            }
+        }
+        iconBox.addView(headerState.brandFallback, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ))
-        account.addView(scroll)
+        iconBox.addView(headerState.brandIcon, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        headerState.brandName.apply {
+            text = initialName
+            textSize = 18f
+            maxLines = 1
+            maxWidth = dp(host, 240)
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setTextColor(resolveTextColor(host))
+            setTypeface(null, Typeface.BOLD)
+        }
+        brand.addView(iconBox)
+        brand.addView(headerState.brandName)
+        brand.setOnClickListener {
+            val selectorId = host.resources.getIdentifier("home_api_fab", "id", host.packageName)
+            val selector = homeFragment.view?.findViewById<View>(selectorId)
+            if (selector?.performClick() != true) {
+                val fallbackId = host.resources.getIdentifier("home_change_api", "id", host.packageName)
+                homeFragment.view?.findViewById<View>(fallbackId)?.performClick()
+            }
+        }
+        account.addView(brand)
 
         parent.removeAllViews()
         orderedChildren.forEachIndexed { index, child ->
             val originalIndex = headerState.originalChildren.indexOf(child)
             val params = when (child) {
                 account -> LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, HEADER_SELECTOR_WEIGHT)
-                search -> LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, HEADER_SEARCH_WEIGHT)
+                search -> LinearLayout.LayoutParams(dp(host, SEARCH_BUTTON_WIDTH_DP), ViewGroup.LayoutParams.MATCH_PARENT)
                 else -> copyLayoutParams(headerState.originalChildLayoutParams[originalIndex])
             }
             if (params == null) parent.addView(child, index)
@@ -380,13 +435,98 @@ class ExamplePlugin : Plugin() {
                 HEADER_SELECTOR_WEIGHT
             )
             search.layoutParams = LinearLayout.LayoutParams(
-                0,
+                dp(host, SEARCH_BUTTON_WIDTH_DP),
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                HEADER_SEARCH_WEIGHT
+                0f
             )
             false
         }
+        attachHomepageNameWatcher(host, homeFragment, headerState)
+        updateSelectedProvider(host, homeFragment, headerState, getHomeApiName(homeFragment))
         return true
+    }
+
+    private fun attachHomepageNameWatcher(
+        host: AppCompatActivity,
+        homeFragment: Fragment,
+        state: HomeHeaderState
+    ) {
+        if (state.homeApiFab != null) return
+        val fabId = host.resources.getIdentifier("home_api_fab", "id", host.packageName)
+        val fab = homeFragment.view?.findViewById<TextView>(fabId) ?: return
+        val watcher = object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                updateSelectedProvider(host, homeFragment, state, getHomeApiName(homeFragment))
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        }
+        state.homeApiFab = fab
+        state.homeApiFabWatcher = watcher
+        fab.addTextChangedListener(watcher)
+    }
+
+    private fun updateSelectedProvider(
+        host: AppCompatActivity,
+        homeFragment: Fragment,
+        state: HomeHeaderState,
+        apiName: String?
+    ) {
+        val api = APIHolder.getApiFromNameNull(apiName)
+        val displayName = api?.let(::getExtensionName) ?: apiName?.removeSuffix("Provider") ?: "Pilih provider"
+        state.brandName.text = displayName
+        state.brandFallback.text = displayName.trim().firstOrNull()?.uppercase() ?: "?"
+        state.brandIcon.setImageDrawable(api?.let { getProviderIcon(host, it) })
+        state.brandIcon.tag = api?.sourcePlugin
+        val sourcePlugin = api?.sourcePlugin ?: return
+        val sourceTag = sourcePlugin
+        synchronized(providerIconUrls) {
+            if (providerIconUrls.containsKey(sourceTag)) {
+                providerIconUrls[sourceTag]?.let { url -> state.brandIcon.loadImage(url) }
+                return
+            }
+            if (!providerIconRequests.add(sourceTag)) return
+        }
+
+        state.iconJob?.cancel()
+        state.iconJob = homeFragment.viewLifecycleOwner.lifecycleScope.launch {
+            val iconUrl = try {
+                withContext(Dispatchers.IO) { findProviderIconUrl(sourceTag) }
+            } finally {
+                synchronized(providerIconUrls) { providerIconRequests.remove(sourceTag) }
+            }
+            synchronized(providerIconUrls) { providerIconUrls[sourceTag] = iconUrl }
+            if (state.brandIcon.tag == sourceTag && !iconUrl.isNullOrBlank()) {
+                state.brandIcon.loadImage(iconUrl)
+            }
+        }
+    }
+
+    private suspend fun findProviderIconUrl(sourcePlugin: String): String? {
+        val installed = (getPluginsOnline().toList() + getPluginsLocal().toList())
+            .firstOrNull { it.filePath == sourcePlugin }
+            ?: return null
+        val repositories: List<RepositoryData> = (
+            RepositoryManager.getRepositories().toList() + PREBUILT_REPOSITORIES.toList()
+        ).distinctBy { it.url }
+        for (repository in repositories) {
+            val matchingPlugin = try {
+                val candidates = RepositoryManager.getRepoPlugins(repository)
+                    ?.filter { it.plugin.internalName == installed.internalName }
+                    .orEmpty()
+                candidates.firstOrNull { it.plugin.url == installed.url }?.plugin
+                    ?: candidates.firstOrNull()?.plugin
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                null
+            } ?: continue
+            return matchingPlugin.iconUrl
+                ?.replace("%size%", "64")
+                ?.replace("%exact_size%", "64")
+                ?.takeIf { it.startsWith("https://", ignoreCase = true) }
+        }
+        return null
     }
 
     private fun watchHomeHeaderLifecycle(account: ViewGroup, state: HomeHeaderState, fragment: Fragment) {
@@ -403,6 +543,8 @@ class ExamplePlugin : Plugin() {
     }
 
     private fun restoreHomeHeader(account: ViewGroup, state: HomeHeaderState) {
+        state.iconJob?.cancel()
+        state.homeApiFab?.removeTextChangedListener(state.homeApiFabWatcher)
         state.search.setOnSearchClickListener(null)
         state.search.setOnCloseListener(null)
         account.removeAllViews()
@@ -425,89 +567,6 @@ class ExamplePlugin : Plugin() {
             val params = state.originalChildLayoutParams[index]
             if (params == null) state.parent.addView(child, index.coerceAtMost(state.parent.childCount))
             else state.parent.addView(child, index.coerceAtMost(state.parent.childCount), params)
-        }
-    }
-
-    private fun createProviderItem(
-        host: AppCompatActivity,
-        homeFragment: Fragment,
-        api: MainAPI,
-        selected: Boolean
-    ): View {
-        val item = LinearLayout(host).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            isClickable = true
-            isFocusable = true
-            contentDescription = api.name
-            setPadding(dp(host, 10), dp(host, 5), dp(host, 12), dp(host, 5))
-            background = GradientDrawable().apply {
-                setColor(if (selected) 0x332196F3 else Color.TRANSPARENT)
-                cornerRadius = dp(host, 10).toFloat()
-                if (selected) setStroke(dp(host, 1), 0xFF64B5F6.toInt())
-            }
-            setOnClickListener {
-                rowSelection(this, host)
-                selectHomepageProvider(host, homeFragment, api)
-            }
-        }
-        val providerDrawable = getProviderIcon(host, api)
-        val icon: View = if (providerDrawable != null) {
-            ImageView(host).apply {
-                setImageDrawable(providerDrawable)
-                scaleType = ImageView.ScaleType.CENTER_INSIDE
-                layoutParams = LinearLayout.LayoutParams(dp(host, 28), dp(host, 28)).apply {
-                    marginEnd = dp(host, 7)
-                }
-            }
-        } else {
-            TextView(host).apply {
-                text = getExtensionName(api).trim().firstOrNull()?.uppercase() ?: "?"
-                textSize = 14f
-                setTypeface(null, Typeface.BOLD)
-                gravity = Gravity.CENTER
-                setTextColor(resolveTextColor(host))
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(0x332196F3)
-                }
-                layoutParams = LinearLayout.LayoutParams(dp(host, 28), dp(host, 28)).apply {
-                    marginEnd = dp(host, 7)
-                }
-            }
-        }
-        val title = TextView(host).apply {
-            text = getExtensionName(api)
-            textSize = 12f
-            maxLines = 1
-            maxWidth = dp(host, 150)
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            setTextColor(resolveTextColor(host))
-            setTypeface(null, if (selected) Typeface.BOLD else Typeface.NORMAL)
-        }
-        item.addView(icon)
-        item.addView(title)
-        return item
-    }
-
-    private fun rowSelection(item: View, context: Context) {
-        val row = item.parent as? ViewGroup ?: return
-        for (index in 0 until row.childCount) {
-            val child = row.getChildAt(index)
-            val selected = child === item
-            child.background = GradientDrawable().apply {
-                setColor(if (selected) 0x332196F3 else Color.TRANSPARENT)
-                cornerRadius = dp(context, 10).toFloat()
-                if (selected) setStroke(dp(context, 1), 0xFF64B5F6.toInt())
-            }
-            (child as? LinearLayout)?.let { container ->
-                for (i in 0 until container.childCount) {
-                    (container.getChildAt(i) as? TextView)?.setTypeface(
-                        null,
-                        if (selected) Typeface.BOLD else Typeface.NORMAL
-                    )
-                }
-            }
         }
     }
 
@@ -565,27 +624,12 @@ class ExamplePlugin : Plugin() {
             .get(homeFragment) as? String
     }.getOrNull()
 
-    private fun selectHomepageProvider(host: AppCompatActivity, homeFragment: Fragment, api: MainAPI) {
-        runCatching {
-            val viewModelClass = Class.forName("com.lagradost.cloudstream3.ui.home.HomeViewModel")
-                .asSubclass(ViewModel::class.java)
-            val viewModel = ViewModelProvider(host).get(viewModelClass)
-            val method = viewModel.javaClass.methods.firstOrNull {
-                it.name == "loadAndCancel" && it.parameterTypes.size == 3 &&
-                    it.parameterTypes[0] == String::class.java
-            } ?: error("Home provider selector method not found")
-            method.invoke(viewModel, api.name, true, true)
-        }.onFailure {
-            android.widget.Toast.makeText(host, "Tidak bisa membuka provider ${api.name}", android.widget.Toast.LENGTH_SHORT).show()
-        }
-    }
-
     private fun dp(context: Context, value: Int) = (value * context.resources.displayMetrics.density).toInt()
 
     private companion object {
         const val LEGACY_SEARCH_BUTTON_TAG = "test_plugin_advanced_search_button"
         const val HEADER_SELECTOR_WEIGHT = 1f
-        const val HEADER_SEARCH_WEIGHT = 0.42f
+        const val SEARCH_BUTTON_WIDTH_DP = 50
     }
 
     private data class LayoutWatcher(
@@ -606,6 +650,12 @@ class ExamplePlugin : Plugin() {
         val accountVisibility: Int,
         val accountPadding: IntArray,
         val accountGravity: Int,
-        val searchVisibility: Int
+        val searchVisibility: Int,
+        val brandIcon: ImageView,
+        val brandFallback: TextView,
+        val brandName: TextView,
+        var homeApiFab: TextView? = null,
+        var homeApiFabWatcher: TextWatcher? = null,
+        var iconJob: Job? = null
     )
 }
