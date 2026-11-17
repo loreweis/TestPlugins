@@ -48,9 +48,7 @@ class ExamplePlugin : Plugin() {
         if (app != null && activityLifecycleCallbacks == null) {
             application = app
             val callbacks = object : Application.ActivityLifecycleCallbacks {
-                override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
-                    attachIfMainActivity(activity)
-                }
+                override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
 
                 override fun onActivityStarted(activity: Activity) = Unit
                 override fun onActivityResumed(activity: Activity) = attachIfMainActivity(activity)
@@ -71,7 +69,13 @@ class ExamplePlugin : Plugin() {
         if (app != null && componentCallbacks == null) {
             val callbacks = object : ComponentCallbacks {
                 override fun onConfigurationChanged(newConfig: Configuration) {
-                    activity?.let { host -> host.runOnUiThread { attachToActivity(host) } }
+                    activity?.let { host ->
+                        host.window.decorView.post {
+                            if (host.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                                attachToActivity(host)
+                            }
+                        }
+                    }
                 }
 
                 override fun onLowMemory() = Unit
@@ -109,10 +113,13 @@ class ExamplePlugin : Plugin() {
     private fun attachIfMainActivity(activity: Activity) {
         if (activity.javaClass.simpleName != "MainActivity") return
         val host = activity as? AppCompatActivity ?: return
-        host.runOnUiThread { attachToActivity(host) }
+        host.window.decorView.post {
+            if (host.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) attachToActivity(host)
+        }
     }
 
     private fun attachToActivity(host: AppCompatActivity) {
+        if (!host.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return
         activity = host
         if (attachedActivities.put(host, true) == null) observeHomeFragments(host)
         visitFragments(host, host.supportFragmentManager)
@@ -150,9 +157,13 @@ class ExamplePlugin : Plugin() {
     }
 
     private fun visitFragments(host: AppCompatActivity, manager: FragmentManager) {
-        manager.fragments.forEach { fragment ->
+        val fragments = runCatching { manager.fragments }.getOrNull() ?: return
+        fragments.forEach { fragment ->
+            if (!fragment.isAdded) return@forEach
             if (isHome(fragment)) fragment.view?.let { watchHomeLayout(host, fragment, it) }
-            visitFragments(host, fragment.childFragmentManager)
+            runCatching { fragment.childFragmentManager }
+                .getOrNull()
+                ?.let { visitFragments(host, it) }
         }
     }
 
