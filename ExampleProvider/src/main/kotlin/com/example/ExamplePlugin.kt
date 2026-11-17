@@ -63,7 +63,9 @@ class ExamplePlugin : Plugin() {
     private val providerIconUrls = mutableMapOf<String, String?>()
     private val providerIconRequests = mutableSetOf<String>()
     private val tuiTypefaceMedium: Typeface by lazy {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) Typeface.create("monospace", 500, false)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            Typeface.create(Typeface.create("monospace", Typeface.NORMAL), 500, false)
+        }
         else Typeface.create("monospace", Typeface.BOLD)
     }
 
