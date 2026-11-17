@@ -371,11 +371,29 @@ class ExamplePlugin : Plugin() {
                 selectHomepageProvider(host, homeFragment, api)
             }
         }
-        val icon = ImageView(host).apply {
-            setImageDrawable(getProviderIcon(host, api))
-            scaleType = ImageView.ScaleType.CENTER_INSIDE
-            layoutParams = LinearLayout.LayoutParams(dp(host, 28), dp(host, 28)).apply {
-                marginEnd = dp(host, 7)
+        val providerDrawable = getProviderIcon(host, api)
+        val icon: View = if (providerDrawable != null) {
+            ImageView(host).apply {
+                setImageDrawable(providerDrawable)
+                scaleType = ImageView.ScaleType.CENTER_INSIDE
+                layoutParams = LinearLayout.LayoutParams(dp(host, 28), dp(host, 28)).apply {
+                    marginEnd = dp(host, 7)
+                }
+            }
+        } else {
+            TextView(host).apply {
+                text = getExtensionName(api).trim().firstOrNull()?.uppercase() ?: "?"
+                textSize = 14f
+                setTypeface(null, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                setTextColor(resolveTextColor(host))
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(0x332196F3)
+                }
+                layoutParams = LinearLayout.LayoutParams(dp(host, 28), dp(host, 28)).apply {
+                    marginEnd = dp(host, 7)
+                }
             }
         }
         val title = TextView(host).apply {
@@ -426,17 +444,30 @@ class ExamplePlugin : Plugin() {
         val pluginResources = plugin?.resources
         if (pluginResources != null) {
             val packageNames = listOf(api.javaClass.packageName, plugin.javaClass.packageName, "com.example").distinct()
+            val iconNames = listOf("ic_launcher", "extension_icon", "plugin_icon", "icon", "logo")
+
+            // Extension resource package names can differ from the provider's Kotlin package.
+            // Resolve drawable IDs from the extension's generated R class first, then try names.
+            val drawableClass = runCatching {
+                plugin.javaClass.classLoader?.loadClass("${plugin.javaClass.packageName}.R\$drawable")
+            }.getOrNull()
+            drawableClass?.fields
+                ?.firstOrNull { field -> field.name in iconNames }
+                ?.let { field ->
+                    val id = field.getInt(null)
+                    if (id != 0) return@runCatching pluginResources.getDrawable(id, context.theme)
+                }
+
             for (packageName in packageNames) {
                 for (type in listOf("mipmap", "drawable")) {
-                    for (name in listOf("ic_launcher", "extension_icon", "icon")) {
+                    for (name in iconNames) {
                         val iconId = pluginResources.getIdentifier(name, type, packageName)
                         if (iconId != 0) return@runCatching pluginResources.getDrawable(iconId, context.theme)
                     }
                 }
             }
         }
-        val fallbackId = context.resources.getIdentifier("ic_baseline_extension_24", "drawable", context.packageName)
-        if (fallbackId != 0) context.getDrawable(fallbackId) else context.getDrawable(android.R.drawable.ic_menu_manage)
+        null
     }.getOrNull()
 
     private fun resolveTextColor(context: Context): Int {
