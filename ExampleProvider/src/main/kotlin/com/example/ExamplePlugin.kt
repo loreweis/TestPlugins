@@ -73,11 +73,6 @@ class ExamplePlugin : Plugin() {
         activity = getAppCompatActivity(context)
         registerMainAPI(ExampleProvider())
 
-        openSettings = { ctx ->
-            val hostActivity = getAppCompatActivity(ctx) ?: activity
-            hostActivity?.let { BlankFragment(this).show(it.supportFragmentManager, "TestControlCenter") }
-        }
-
         val app = context.applicationContext as? Application
         if (app != null && activityLifecycleCallbacks == null) {
             application = app
